@@ -40,6 +40,74 @@ function buildEmail(toEmail, code, appName) {
   };
 }
 
+let cachedMailboxId = null;
+
+// Resolves the opaque mailbox "resourceId" the Send Email endpoint needs, from the
+// human-readable address set in HOSTINGER_MAILBOX_ADDRESS (e.g. noreply@yourdomain.com).
+// Calls GET /api/v1/me once and caches the result — you never have to hunt for the
+// resourceId (looks like "AC1a2b3c4d5e6f7g") by hand. If you already have it, set
+// HOSTINGER_MAILBOX_ID directly instead and this lookup is skipped entirely.
+async function resolveMailboxId(token) {
+  if (process.env.HOSTINGER_MAILBOX_ID) return process.env.HOSTINGER_MAILBOX_ID;
+  if (cachedMailboxId) return cachedMailboxId;
+
+  const address = process.env.HOSTINGER_MAILBOX_ADDRESS;
+  if (!address) {
+    throw new Error(
+      "Set HOSTINGER_MAILBOX_ADDRESS (e.g. noreply@yourdomain.com) or HOSTINGER_MAILBOX_ID to use the Hostinger Mail API."
+    );
+  }
+
+  const res = await fetch("https://api.mail.hostinger.com/api/v1/me", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Hostinger Mail API error looking up mailboxes (${res.status}): ${body || res.statusText}`);
+  }
+  const json = await res.json();
+  const mailbox = (json.data?.mailboxes || []).find(
+    (m) => m.address.toLowerCase() === address.toLowerCase()
+  );
+  if (!mailbox) {
+    throw new Error(`No mailbox matching HOSTINGER_MAILBOX_ADDRESS (${address}) found for this API token.`);
+  }
+
+  cachedMailboxId = mailbox.resourceId;
+  return cachedMailboxId;
+}
+
+// Sends via Hostinger's own Mail API (https://api.mail.hostinger.com) — HTTPS-based,
+// same reasoning as Brevo below (bypasses SMTP port blocking), but uses your existing
+// Hostinger mailbox directly instead of a third-party service. Set up in hPanel:
+// Emails → your domain → Agentic mail → API access → Create API token.
+async function sendViaHostingerMail(toEmail, code, appName) {
+  const { subject, text, html, name } = buildEmail(toEmail, code, appName);
+  const token = process.env.HOSTINGER_MAIL_API_TOKEN;
+  const mailboxId = await resolveMailboxId(token);
+
+  const res = await fetch(`https://api.mail.hostinger.com/api/v1/mailboxes/${mailboxId}/send`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({
+      to: [toEmail],
+      displayName: name,
+      subject,
+      text,
+      html,
+    }),
+  });
+
+  // Success is 204 No Content per Hostinger's API spec — anything else is an error.
+  if (res.status !== 204) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Hostinger Mail API error (${res.status}): ${body || res.statusText}`);
+  }
+}
+
 // Sends via Brevo's HTTP API (https://api.brevo.com) instead of raw SMTP.
 // Many Node.js app hosting platforms (Hostinger's Node app hosting included, along
 // with Render/Railway/Vercel) block outbound SMTP ports (465/587) to prevent spam,
@@ -89,6 +157,9 @@ async function sendViaSmtp(toEmail, code, appName) {
 }
 
 async function sendOtpEmail(toEmail, code, appName) {
+  if (process.env.HOSTINGER_MAIL_API_TOKEN) {
+    return sendViaHostingerMail(toEmail, code, appName);
+  }
   if (process.env.BREVO_API_KEY) {
     return sendViaBrevo(toEmail, code, appName);
   }
