@@ -33,6 +33,18 @@ async function ensureColumn(table, column, definition) {
   }
 }
 
+// Adds a unique index to an existing table only if it isn't already there.
+async function ensureUniqueIndex(table, indexName, columnExpr) {
+  const [rows] = await pool.query(
+    `SELECT INDEX_NAME FROM information_schema.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?`,
+    [table, indexName]
+  );
+  if (rows.length === 0) {
+    await pool.query(`ALTER TABLE ${table} ADD UNIQUE INDEX ${indexName} (${columnExpr})`);
+  }
+}
+
 // Tables are created in an order that avoids a circular foreign key at creation time:
 // users.business_id -> businesses.id is added afterwards via ALTER TABLE, once both
 // tables exist. Safe to call on every server start — every statement is idempotent.
@@ -42,13 +54,16 @@ async function ensureSchema() {
       id            INT AUTO_INCREMENT PRIMARY KEY,
       name          VARCHAR(255) NOT NULL,
       email         VARCHAR(255) NOT NULL UNIQUE,
-      password_hash VARCHAR(255) NOT NULL,
+      password_hash VARCHAR(255) NULL,
       role          ENUM('admin', 'staff') NOT NULL,
       business_id   INT NULL,
       active        TINYINT(1) NOT NULL DEFAULT 1,
       created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
+  // Databases created before OTP login existed have password_hash as NOT NULL —
+  // relax it so OTP-only accounts (no password set) are allowed. Harmless to re-run.
+  await pool.query(`ALTER TABLE users MODIFY COLUMN password_hash VARCHAR(255) NULL`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS businesses (
@@ -96,6 +111,25 @@ async function ensureSchema() {
       `ALTER TABLE users ADD CONSTRAINT fk_users_managed_by FOREIGN KEY (managed_by) REFERENCES users(id) ON DELETE SET NULL`
     );
   }
+
+  // Phone number login: each user has a unique phone number. Login works by
+  // requesting a one-time code that's emailed to the account's registered email
+  // (free — no SMS provider needed), then verifying that code.
+  await ensureColumn("users", "phone", "VARCHAR(20) NULL");
+  await ensureUniqueIndex("users", "uniq_users_phone", "phone");
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS otp_codes (
+      id          INT AUTO_INCREMENT PRIMARY KEY,
+      phone       VARCHAR(20) NOT NULL,
+      code        VARCHAR(10) NOT NULL,
+      expires_at  DATETIME NOT NULL,
+      attempts    INT NOT NULL DEFAULT 0,
+      used        TINYINT(1) NOT NULL DEFAULT 0,
+      created_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_otp_phone (phone, used, expires_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS customers (
@@ -164,4 +198,4 @@ async function ensureSchema() {
   `);
 }
 
-module.exports = { pool, ensureSchema, ensureColumn };
+module.exports = { pool, ensureSchema, ensureColumn, ensureUniqueIndex };

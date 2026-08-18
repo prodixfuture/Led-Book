@@ -56,7 +56,7 @@ router.get("/", async (req, res, next) => {
     let rows;
     if (req.user.role === "admin") {
       [rows] = await pool.query(
-        `SELECT u.id, u.name, u.email, u.role, u.business_id, u.active, u.created_at, b.name AS business_name,
+        `SELECT u.id, u.name, u.email, u.phone, u.role, u.business_id, u.active, u.created_at, b.name AS business_name,
            ${PERM_COLUMNS.map((c) => `u.${c}`).join(", ")}
          FROM users u
          LEFT JOIN businesses b ON b.id = u.business_id
@@ -68,7 +68,7 @@ router.get("/", async (req, res, next) => {
       );
     } else {
       [rows] = await pool.query(
-        `SELECT u.id, u.name, u.email, u.role, u.business_id, u.active, u.created_at, b.name AS business_name,
+        `SELECT u.id, u.name, u.email, u.phone, u.role, u.business_id, u.active, u.created_at, b.name AS business_name,
            ${PERM_COLUMNS.map((c) => `u.${c}`).join(", ")}
          FROM users u
          LEFT JOIN businesses b ON b.id = u.business_id
@@ -86,12 +86,16 @@ router.get("/", async (req, res, next) => {
 // Create a staff user, optionally assigned to a business, with permission flags.
 router.post("/", async (req, res, next) => {
   try {
-    const { name, email, password, business_id, permissions } = req.body;
+    const { name, email, phone, password, business_id, permissions } = req.body;
 
-    if (!name || !email || !password) {
-      return res.status(400).json({ error: "name, email and password are required" });
+    if (!name || !email) {
+      return res.status(400).json({ error: "name and email are required" });
     }
-    if (password.length < 8) {
+    const cleanPhone = (phone || "").toString().trim();
+    if (!cleanPhone) {
+      return res.status(400).json({ error: "phone is required (used for OTP login)" });
+    }
+    if (password && password.length < 8) {
       return res.status(400).json({ error: "Password must be at least 8 characters" });
     }
 
@@ -109,9 +113,15 @@ router.post("/", async (req, res, next) => {
       }
     }
 
-    const [existing] = await pool.query("SELECT id FROM users WHERE email = ?", [email.toLowerCase().trim()]);
-    if (existing.length > 0) {
+    const [existingEmail] = await pool.query("SELECT id FROM users WHERE email = ?", [
+      email.toLowerCase().trim(),
+    ]);
+    if (existingEmail.length > 0) {
       return res.status(409).json({ error: "A user with this email already exists" });
+    }
+    const [existingPhone] = await pool.query("SELECT id FROM users WHERE phone = ?", [cleanPhone]);
+    if (existingPhone.length > 0) {
+      return res.status(409).json({ error: "A user with this phone number already exists" });
     }
 
     const perms = {
@@ -132,15 +142,16 @@ router.post("/", async (req, res, next) => {
       }
     }
 
-    const hash = bcrypt.hashSync(password, 10);
+    const hash = password ? bcrypt.hashSync(password, 10) : null;
     const [result] = await pool.query(
       `INSERT INTO users
-         (name, email, password_hash, role, business_id, managed_by,
+         (name, email, phone, password_hash, role, business_id, managed_by,
           perm_manage_customers, perm_manage_ledger, perm_manage_records, perm_view_reports, perm_manage_staff)
-       VALUES (?, ?, ?, 'staff', ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, 'staff', ?, ?, ?, ?, ?, ?, ?)`,
       [
         name.trim(),
         email.toLowerCase().trim(),
+        cleanPhone,
         hash,
         finalBusinessId,
         req.user.role === "admin" ? req.user.id : null,
@@ -170,7 +181,20 @@ router.patch("/:id", async (req, res, next) => {
       return res.status(403).json({ error: "You do not manage this user" });
     }
 
-    const { name, business_id, active, new_password, permissions } = req.body;
+    const { name, phone, business_id, active, new_password, permissions } = req.body;
+
+    if (phone !== undefined) {
+      const cleanPhone = (phone || "").toString().trim();
+      if (!cleanPhone) return res.status(400).json({ error: "phone cannot be empty" });
+      const [existingPhone] = await pool.query("SELECT id FROM users WHERE phone = ? AND id != ?", [
+        cleanPhone,
+        req.params.id,
+      ]);
+      if (existingPhone.length > 0) {
+        return res.status(409).json({ error: "A user with this phone number already exists" });
+      }
+      await pool.query("UPDATE users SET phone = ? WHERE id = ?", [cleanPhone, req.params.id]);
+    }
 
     if (business_id !== undefined && req.user.role === "admin") {
       if (business_id !== null) {
