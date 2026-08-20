@@ -8,7 +8,11 @@ router.use(requireAuth);
 
 const CATEGORIES = ["income", "expense", "bill", "contribution"];
 
+const PAYMENT_MODES = ["cash", "cheque", "upi", "bank_transfer", "other"];
+
 // List records for a business. Optional filters: category, from, to (record_date range).
+// Includes the linked customer's current balance (if any) so the client can show
+// "advance given/take" context right on the record without a second request.
 router.get("/", resolveBusinessId, async (req, res, next) => {
   try {
     const { category, from, to } = req.query;
@@ -32,7 +36,12 @@ router.get("/", resolveBusinessId, async (req, res, next) => {
     }
 
     const [rows] = await pool.query(
-      `SELECT r.*, c.name AS customer_name
+      `SELECT r.*, c.name AS customer_name,
+         CASE WHEN c.id IS NULL THEN NULL ELSE
+           c.opening_balance
+             + COALESCE((SELECT SUM(CASE WHEN t.type = 'debit' THEN t.amount ELSE 0 END) FROM transactions t WHERE t.customer_id = c.id), 0)
+             - COALESCE((SELECT SUM(CASE WHEN t.type = 'credit' THEN t.amount ELSE 0 END) FROM transactions t WHERE t.customer_id = c.id), 0)
+         END AS customer_balance
        FROM records r
        LEFT JOIN customers c ON c.id = r.customer_id
        WHERE ${clauses.join(" AND ")}
@@ -48,7 +57,8 @@ router.get("/", resolveBusinessId, async (req, res, next) => {
 
 router.post("/", resolveBusinessId, requirePermission("manage_records"), async (req, res, next) => {
   try {
-    const { category, title, amount, note, party_name, customer_id, record_date, due_date, settled } = req.body;
+    const { category, title, amount, note, party_name, customer_id, record_date, due_date, settled, payment_mode, reference_no } =
+      req.body;
 
     if (!category || !CATEGORIES.includes(category)) {
       return res.status(400).json({ error: `category must be one of: ${CATEGORIES.join(", ")}` });
@@ -58,6 +68,9 @@ router.post("/", resolveBusinessId, requirePermission("manage_records"), async (
     }
     if (!amount || Number(amount) <= 0) {
       return res.status(400).json({ error: "amount must be greater than zero" });
+    }
+    if (payment_mode && !PAYMENT_MODES.includes(payment_mode)) {
+      return res.status(400).json({ error: `payment_mode must be one of: ${PAYMENT_MODES.join(", ")}` });
     }
 
     if (customer_id) {
@@ -75,8 +88,8 @@ router.post("/", resolveBusinessId, requirePermission("manage_records"), async (
     const defaultSettled = category === "income" || category === "contribution" ? 1 : 0;
 
     const [result] = await pool.query(
-      `INSERT INTO records (business_id, category, title, amount, note, party_name, customer_id, record_date, due_date, settled, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURDATE()), ?, ?, ?)`,
+      `INSERT INTO records (business_id, category, title, amount, note, party_name, customer_id, record_date, due_date, settled, payment_mode, reference_no, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURDATE()), ?, ?, ?, ?, ?)`,
       [
         req.businessId,
         category,
@@ -88,6 +101,8 @@ router.post("/", resolveBusinessId, requirePermission("manage_records"), async (
         record_date || null,
         due_date || null,
         settled === undefined ? defaultSettled : settled ? 1 : 0,
+        payment_mode || "cash",
+        reference_no || null,
         req.user.id,
       ]
     );
@@ -106,7 +121,10 @@ router.patch("/:id", resolveBusinessId, requirePermission("manage_records"), asy
     ]);
     if (rows.length === 0) return res.status(404).json({ error: "Record not found" });
 
-    const { title, amount, note, party_name, due_date, settled } = req.body;
+    const { title, amount, note, party_name, due_date, settled, payment_mode, reference_no } = req.body;
+    if (payment_mode && !PAYMENT_MODES.includes(payment_mode)) {
+      return res.status(400).json({ error: `payment_mode must be one of: ${PAYMENT_MODES.join(", ")}` });
+    }
     await pool.query(
       `UPDATE records SET
          title = COALESCE(?, title),
@@ -114,7 +132,9 @@ router.patch("/:id", resolveBusinessId, requirePermission("manage_records"), asy
          note = COALESCE(?, note),
          party_name = COALESCE(?, party_name),
          due_date = COALESCE(?, due_date),
-         settled = COALESCE(?, settled)
+         settled = COALESCE(?, settled),
+         payment_mode = COALESCE(?, payment_mode),
+         reference_no = COALESCE(?, reference_no)
        WHERE id = ?`,
       [
         title ?? null,
@@ -123,6 +143,8 @@ router.patch("/:id", resolveBusinessId, requirePermission("manage_records"), asy
         party_name ?? null,
         due_date ?? null,
         settled === undefined ? null : settled ? 1 : 0,
+        payment_mode ?? null,
+        reference_no ?? null,
         req.params.id,
       ]
     );

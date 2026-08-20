@@ -71,12 +71,18 @@ router.post("/login", async (req, res, next) => {
 });
 
 // --- Public sign up: creates a brand-new admin account (their own company/business
-// owner). Staff accounts are always created by an admin, never through this route. ---
+// owner). Staff accounts are always created by an admin, never through this route.
+// password is optional — if provided, the account can log in with email+password
+// right away in addition to phone OTP; if omitted, it's an OTP-only account until
+// a password is set later via POST /auth/change-password. ---
 router.post("/signup", async (req, res, next) => {
   try {
-    const { name, email, phone } = req.body;
+    const { name, email, phone, password } = req.body;
     if (!name || !name.trim()) return res.status(400).json({ error: "Name is required" });
     if (!email || !email.trim()) return res.status(400).json({ error: "Email is required" });
+    if (password && password.length < 8) {
+      return res.status(400).json({ error: "Password must be at least 8 characters" });
+    }
 
     const cleanPhone = normalizePhone(phone);
     if (!cleanPhone) return res.status(400).json({ error: "Phone number is required" });
@@ -92,11 +98,12 @@ router.post("/signup", async (req, res, next) => {
       return res.status(409).json({ error: "An account with this phone number already exists" });
     }
 
+    const hash = password ? bcrypt.hashSync(password, 10) : null;
     const [result] = await pool.query(
-      `INSERT INTO users (name, email, phone, role, password_hash,
+      `INSERT INTO users (name, email, phone, role, password_hash, active,
          perm_manage_customers, perm_manage_ledger, perm_manage_records, perm_view_reports, perm_manage_staff)
-       VALUES (?, ?, ?, 'admin', NULL, 1, 1, 1, 1, 1)`,
-      [name.trim(), cleanEmail, cleanPhone]
+       VALUES (?, ?, ?, 'admin', ?, 1, 1, 1, 1, 1, 1)`,
+      [name.trim(), cleanEmail, cleanPhone, hash]
     );
 
     res.status(201).json({ id: result.insertId });

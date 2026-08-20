@@ -24,17 +24,27 @@ async function balanceForCustomer(customerId, openingBalance) {
   };
 }
 
-// List customers for a business, with computed balances.
+// List customers for a business, with computed balances — one aggregate query
+// instead of one balance lookup per customer, which matters a lot over a remote
+// MySQL connection where each extra round-trip adds real latency.
 router.get("/", resolveBusinessId, async (req, res, next) => {
   try {
-    const [customers] = await pool.query("SELECT * FROM customers WHERE business_id = ? ORDER BY name ASC", [
-      req.businessId,
-    ]);
-
-    const withBalances = await Promise.all(
-      customers.map(async (c) => ({ ...c, ...(await balanceForCustomer(c.id, c.opening_balance)) }))
+    const [customers] = await pool.query(
+      `SELECT c.*,
+         COALESCE(SUM(CASE WHEN t.type = 'debit' THEN t.amount ELSE 0 END), 0) AS total_debit,
+         COALESCE(SUM(CASE WHEN t.type = 'credit' THEN t.amount ELSE 0 END), 0) AS total_credit,
+         c.opening_balance
+           + COALESCE(SUM(CASE WHEN t.type = 'debit' THEN t.amount ELSE 0 END), 0)
+           - COALESCE(SUM(CASE WHEN t.type = 'credit' THEN t.amount ELSE 0 END), 0) AS balance
+       FROM customers c
+       LEFT JOIN transactions t ON t.customer_id = c.id
+       WHERE c.business_id = ?
+       GROUP BY c.id
+       ORDER BY c.name ASC`,
+      [req.businessId]
     );
-    res.json({ customers: withBalances });
+
+    res.json({ customers });
   } catch (err) {
     next(err);
   }

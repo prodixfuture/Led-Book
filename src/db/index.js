@@ -9,6 +9,11 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
+  // Keeps pooled connections to a remote MySQL server (like Hostinger's) alive so
+  // they don't get silently dropped by an idle timeout, which would otherwise force
+  // a full reconnect (extra round-trip latency) on the next request.
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 10000,
   // Without these, mysql2 returns DECIMAL columns as strings ("1200.00") and
   // DATE/DATETIME columns as JS Date objects (serialized to full ISO timestamps) —
   // both the React and Flutter clients expect plain numbers and "YYYY-MM-DD" strings.
@@ -169,6 +174,18 @@ async function ensureSchema() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
+  // Payment mode (how the money moved) — shown on the ledger entry / record so it's
+  // clear whether cash changed hands, a cheque was written, or a UPI/bank transfer
+  // happened. reference_no holds the cheque number, UPI transaction ID, etc.
+  // depending on the selected mode — one generic column, labeled contextually by
+  // the client based on payment_mode.
+  await ensureColumn(
+    "transactions",
+    "payment_mode",
+    "ENUM('cash','cheque','upi','bank_transfer','other') NOT NULL DEFAULT 'cash'"
+  );
+  await ensureColumn("transactions", "reference_no", "VARCHAR(100) NULL");
+
   // General business records: income, expense, bill, contribution. Separate from
   // `transactions` (which is specifically the customer "you gave / you got" ledger).
   // customer_id is optional — a record can stand alone (e.g. "Electricity bill") or
@@ -194,6 +211,32 @@ async function ensureSchema() {
       INDEX idx_records_business (business_id),
       INDEX idx_records_category (category),
       INDEX idx_records_due (due_date, settled)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+  await ensureColumn(
+    "records",
+    "payment_mode",
+    "ENUM('cash','cheque','upi','bank_transfer','other') NOT NULL DEFAULT 'cash'"
+  );
+  await ensureColumn("records", "reference_no", "VARCHAR(100) NULL");
+
+  // Cashbook: a simple day-to-day cash/online IN-OUT tracker, separate from the
+  // customer ledger and the income/expense records above — mirrors the classic
+  // "Cashbook" feature (physical cash-in-hand vs. online/bank balance).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS cashbook_entries (
+      id           INT AUTO_INCREMENT PRIMARY KEY,
+      business_id  INT NOT NULL,
+      direction    ENUM('in', 'out') NOT NULL,
+      mode         ENUM('cash', 'online') NOT NULL DEFAULT 'cash',
+      amount       DECIMAL(14,2) NOT NULL,
+      note         VARCHAR(500),
+      entry_date   DATE NOT NULL,
+      created_by   INT NULL,
+      created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT fk_cashbook_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE,
+      CONSTRAINT fk_cashbook_created_by FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+      INDEX idx_cashbook_business (business_id, entry_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 }

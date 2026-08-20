@@ -6,10 +6,12 @@ const router = express.Router();
 
 router.use(requireAuth);
 
+const PAYMENT_MODES = ["cash", "cheque", "upi", "bank_transfer", "other"];
+
 // Create a ledger entry (debit = you gave / they owe more, credit = you got / payment received)
 router.post("/", resolveBusinessId, requirePermission("manage_ledger"), async (req, res, next) => {
   try {
-    const { customer_id, type, amount, note, txn_date, due_date } = req.body;
+    const { customer_id, type, amount, note, txn_date, due_date, payment_mode, reference_no } = req.body;
 
     if (!customer_id || !type || !amount) {
       return res.status(400).json({ error: "customer_id, type and amount are required" });
@@ -19,6 +21,9 @@ router.post("/", resolveBusinessId, requirePermission("manage_ledger"), async (r
     }
     if (Number(amount) <= 0) {
       return res.status(400).json({ error: "amount must be greater than zero" });
+    }
+    if (payment_mode && !PAYMENT_MODES.includes(payment_mode)) {
+      return res.status(400).json({ error: `payment_mode must be one of: ${PAYMENT_MODES.join(", ")}` });
     }
 
     const [customerRows] = await pool.query("SELECT id FROM customers WHERE id = ? AND business_id = ?", [
@@ -30,9 +35,20 @@ router.post("/", resolveBusinessId, requirePermission("manage_ledger"), async (r
     }
 
     const [result] = await pool.query(
-      `INSERT INTO transactions (business_id, customer_id, type, amount, note, txn_date, due_date, created_by)
-       VALUES (?, ?, ?, ?, ?, COALESCE(?, CURDATE()), ?, ?)`,
-      [req.businessId, customer_id, type, amount, note || null, txn_date || null, due_date || null, req.user.id]
+      `INSERT INTO transactions (business_id, customer_id, type, amount, note, txn_date, due_date, payment_mode, reference_no, created_by)
+       VALUES (?, ?, ?, ?, ?, COALESCE(?, CURDATE()), ?, ?, ?, ?)`,
+      [
+        req.businessId,
+        customer_id,
+        type,
+        amount,
+        note || null,
+        txn_date || null,
+        due_date || null,
+        payment_mode || "cash",
+        reference_no || null,
+        req.user.id,
+      ]
     );
 
     res.status(201).json({ id: result.insertId });
@@ -49,15 +65,28 @@ router.patch("/:id", resolveBusinessId, requirePermission("manage_ledger"), asyn
     ]);
     if (rows.length === 0) return res.status(404).json({ error: "Transaction not found" });
 
-    const { note, due_date, settled, amount } = req.body;
+    const { note, due_date, settled, amount, payment_mode, reference_no } = req.body;
+    if (payment_mode && !PAYMENT_MODES.includes(payment_mode)) {
+      return res.status(400).json({ error: `payment_mode must be one of: ${PAYMENT_MODES.join(", ")}` });
+    }
     await pool.query(
       `UPDATE transactions SET
          note = COALESCE(?, note),
          due_date = COALESCE(?, due_date),
          settled = COALESCE(?, settled),
-         amount = COALESCE(?, amount)
+         amount = COALESCE(?, amount),
+         payment_mode = COALESCE(?, payment_mode),
+         reference_no = COALESCE(?, reference_no)
        WHERE id = ?`,
-      [note ?? null, due_date ?? null, settled === undefined ? null : settled ? 1 : 0, amount ?? null, req.params.id]
+      [
+        note ?? null,
+        due_date ?? null,
+        settled === undefined ? null : settled ? 1 : 0,
+        amount ?? null,
+        payment_mode ?? null,
+        reference_no ?? null,
+        req.params.id,
+      ]
     );
 
     res.json({ ok: true });
