@@ -10,7 +10,7 @@ router.use(requireAuth);
 router.get("/", resolveBusinessId, async (req, res, next) => {
   try {
     const { from, to, mode } = req.query;
-    const clauses = ["business_id = ?"];
+    const clauses = ["business_id = ?", "deleted_at IS NULL"];
     const params = [req.businessId];
 
     if (from) {
@@ -50,7 +50,7 @@ router.get("/summary", resolveBusinessId, async (req, res, next) => {
                             WHEN mode = 'cash' AND direction = 'out' THEN -amount ELSE 0 END), 0) AS cash_balance,
          COALESCE(SUM(CASE WHEN mode = 'online' AND direction = 'in' THEN amount
                             WHEN mode = 'online' AND direction = 'out' THEN -amount ELSE 0 END), 0) AS online_balance
-       FROM cashbook_entries WHERE business_id = ?`,
+       FROM cashbook_entries WHERE business_id = ? AND deleted_at IS NULL`,
       [req.businessId]
     );
 
@@ -59,7 +59,7 @@ router.get("/summary", resolveBusinessId, async (req, res, next) => {
          COALESCE(SUM(CASE WHEN direction = 'in' THEN amount ELSE 0 END), 0) AS today_in,
          COALESCE(SUM(CASE WHEN direction = 'out' THEN amount ELSE 0 END), 0) AS today_out,
          COUNT(*) AS today_count
-       FROM cashbook_entries WHERE business_id = ? AND entry_date = CURDATE()`,
+       FROM cashbook_entries WHERE business_id = ? AND deleted_at IS NULL AND entry_date = CURDATE()`,
       [req.businessId]
     );
 
@@ -91,7 +91,7 @@ router.get("/daily", resolveBusinessId, async (req, res, next) => {
          COALESCE(SUM(CASE WHEN direction = 'out' THEN amount ELSE 0 END), 0) AS total_out,
          COUNT(*) AS entry_count
        FROM cashbook_entries
-       WHERE business_id = ?
+       WHERE business_id = ? AND deleted_at IS NULL
        GROUP BY entry_date
        ORDER BY entry_date DESC
        LIMIT ?`,
@@ -131,10 +131,10 @@ router.post("/", resolveBusinessId, requirePermission("manage_records"), async (
 
 router.patch("/:id", resolveBusinessId, requirePermission("manage_records"), async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM cashbook_entries WHERE id = ? AND business_id = ?", [
-      req.params.id,
-      req.businessId,
-    ]);
+    const [rows] = await pool.query(
+      "SELECT * FROM cashbook_entries WHERE id = ? AND business_id = ? AND deleted_at IS NULL",
+      [req.params.id, req.businessId]
+    );
     if (rows.length === 0) return res.status(404).json({ error: "Entry not found" });
 
     const { amount, note, mode } = req.body;
@@ -156,15 +156,16 @@ router.patch("/:id", resolveBusinessId, requirePermission("manage_records"), asy
   }
 });
 
+// Soft delete — moves the entry to the Recycle Bin instead of removing it.
 router.delete("/:id", resolveBusinessId, requirePermission("manage_records"), async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM cashbook_entries WHERE id = ? AND business_id = ?", [
-      req.params.id,
-      req.businessId,
-    ]);
+    const [rows] = await pool.query(
+      "SELECT * FROM cashbook_entries WHERE id = ? AND business_id = ? AND deleted_at IS NULL",
+      [req.params.id, req.businessId]
+    );
     if (rows.length === 0) return res.status(404).json({ error: "Entry not found" });
 
-    await pool.query("DELETE FROM cashbook_entries WHERE id = ?", [req.params.id]);
+    await pool.query("UPDATE cashbook_entries SET deleted_at = NOW() WHERE id = ?", [req.params.id]);
     res.json({ ok: true });
   } catch (err) {
     next(err);

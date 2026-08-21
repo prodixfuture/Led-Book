@@ -10,6 +10,7 @@ const customerRoutes = require("./routes/customers");
 const transactionRoutes = require("./routes/transactions");
 const recordRoutes = require("./routes/records");
 const cashbookRoutes = require("./routes/cashbook");
+const recycleBinRoutes = require("./routes/recycle-bin");
 const reportRoutes = require("./routes/reports");
 
 if (!process.env.JWT_SECRET) {
@@ -52,6 +53,7 @@ app.use("/api/customers", customerRoutes);
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/records", recordRoutes);
 app.use("/api/cashbook", cashbookRoutes);
+app.use("/api/recycle-bin", recycleBinRoutes);
 app.use("/api/reports", reportRoutes);
 
 // 404 handler

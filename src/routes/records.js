@@ -16,7 +16,7 @@ const PAYMENT_MODES = ["cash", "cheque", "upi", "bank_transfer", "other"];
 router.get("/", resolveBusinessId, async (req, res, next) => {
   try {
     const { category, from, to } = req.query;
-    const clauses = ["r.business_id = ?"];
+    const clauses = ["r.business_id = ?", "r.deleted_at IS NULL"];
     const params = [req.businessId];
 
     if (category) {
@@ -39,8 +39,8 @@ router.get("/", resolveBusinessId, async (req, res, next) => {
       `SELECT r.*, c.name AS customer_name,
          CASE WHEN c.id IS NULL THEN NULL ELSE
            c.opening_balance
-             + COALESCE((SELECT SUM(CASE WHEN t.type = 'debit' THEN t.amount ELSE 0 END) FROM transactions t WHERE t.customer_id = c.id), 0)
-             - COALESCE((SELECT SUM(CASE WHEN t.type = 'credit' THEN t.amount ELSE 0 END) FROM transactions t WHERE t.customer_id = c.id), 0)
+             + COALESCE((SELECT SUM(CASE WHEN t.type = 'debit' THEN t.amount ELSE 0 END) FROM transactions t WHERE t.customer_id = c.id AND t.deleted_at IS NULL), 0)
+             - COALESCE((SELECT SUM(CASE WHEN t.type = 'credit' THEN t.amount ELSE 0 END) FROM transactions t WHERE t.customer_id = c.id AND t.deleted_at IS NULL), 0)
          END AS customer_balance
        FROM records r
        LEFT JOIN customers c ON c.id = r.customer_id
@@ -115,10 +115,10 @@ router.post("/", resolveBusinessId, requirePermission("manage_records"), async (
 
 router.patch("/:id", resolveBusinessId, requirePermission("manage_records"), async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM records WHERE id = ? AND business_id = ?", [
-      req.params.id,
-      req.businessId,
-    ]);
+    const [rows] = await pool.query(
+      "SELECT * FROM records WHERE id = ? AND business_id = ? AND deleted_at IS NULL",
+      [req.params.id, req.businessId]
+    );
     if (rows.length === 0) return res.status(404).json({ error: "Record not found" });
 
     const { title, amount, note, party_name, due_date, settled, payment_mode, reference_no } = req.body;
@@ -155,15 +155,16 @@ router.patch("/:id", resolveBusinessId, requirePermission("manage_records"), asy
   }
 });
 
+// Soft delete — moves the record to the Recycle Bin instead of removing it.
 router.delete("/:id", resolveBusinessId, requirePermission("manage_records"), async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM records WHERE id = ? AND business_id = ?", [
-      req.params.id,
-      req.businessId,
-    ]);
+    const [rows] = await pool.query(
+      "SELECT * FROM records WHERE id = ? AND business_id = ? AND deleted_at IS NULL",
+      [req.params.id, req.businessId]
+    );
     if (rows.length === 0) return res.status(404).json({ error: "Record not found" });
 
-    await pool.query("DELETE FROM records WHERE id = ?", [req.params.id]);
+    await pool.query("UPDATE records SET deleted_at = NOW() WHERE id = ?", [req.params.id]);
     res.json({ ok: true });
   } catch (err) {
     next(err);
@@ -179,6 +180,7 @@ router.get("/reminders", resolveBusinessId, async (req, res, next) => {
       `SELECT r.*, DATEDIFF(r.due_date, CURDATE()) AS days_until_due
        FROM records r
        WHERE r.business_id = ?
+         AND r.deleted_at IS NULL
          AND r.category = 'bill'
          AND r.settled = 0
          AND r.due_date IS NOT NULL

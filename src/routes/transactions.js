@@ -59,10 +59,10 @@ router.post("/", resolveBusinessId, requirePermission("manage_ledger"), async (r
 
 router.patch("/:id", resolveBusinessId, requirePermission("manage_ledger"), async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM transactions WHERE id = ? AND business_id = ?", [
-      req.params.id,
-      req.businessId,
-    ]);
+    const [rows] = await pool.query(
+      "SELECT * FROM transactions WHERE id = ? AND business_id = ? AND deleted_at IS NULL",
+      [req.params.id, req.businessId]
+    );
     if (rows.length === 0) return res.status(404).json({ error: "Transaction not found" });
 
     const { note, due_date, settled, amount, payment_mode, reference_no } = req.body;
@@ -95,15 +95,16 @@ router.patch("/:id", resolveBusinessId, requirePermission("manage_ledger"), asyn
   }
 });
 
+// Soft delete — moves the entry to the Recycle Bin instead of removing it.
 router.delete("/:id", resolveBusinessId, requirePermission("manage_ledger"), async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM transactions WHERE id = ? AND business_id = ?", [
-      req.params.id,
-      req.businessId,
-    ]);
+    const [rows] = await pool.query(
+      "SELECT * FROM transactions WHERE id = ? AND business_id = ? AND deleted_at IS NULL",
+      [req.params.id, req.businessId]
+    );
     if (rows.length === 0) return res.status(404).json({ error: "Transaction not found" });
 
-    await pool.query("DELETE FROM transactions WHERE id = ?", [req.params.id]);
+    await pool.query("UPDATE transactions SET deleted_at = NOW() WHERE id = ?", [req.params.id]);
     res.json({ ok: true });
   } catch (err) {
     next(err);
@@ -122,6 +123,7 @@ router.get("/reminders", resolveBusinessId, async (req, res, next) => {
        FROM transactions t
        JOIN customers c ON c.id = t.customer_id
        WHERE t.business_id = ?
+         AND t.deleted_at IS NULL
          AND t.type = 'debit'
          AND t.settled = 0
          AND t.due_date IS NOT NULL

@@ -213,11 +213,7 @@ async function ensureSchema() {
       INDEX idx_records_due (due_date, settled)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
-  await ensureColumn(
-    "records",
-    "payment_mode",
-    "ENUM('cash','cheque','upi','bank_transfer','other') NOT NULL DEFAULT 'cash'"
-  );
+  await ensureColumn("records", "payment_mode", "ENUM('cash','cheque','upi','bank_transfer','other') NOT NULL DEFAULT 'cash'");
   await ensureColumn("records", "reference_no", "VARCHAR(100) NULL");
 
   // Cashbook: a simple day-to-day cash/online IN-OUT tracker, separate from the
@@ -239,6 +235,16 @@ async function ensureSchema() {
       INDEX idx_cashbook_business (business_id, entry_date)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
+
+  // Recycle bin: deletes across these four tables are soft — they set deleted_at
+  // instead of removing the row, so they can be restored or permanently purged
+  // later from the Recycle Bin screen. Every list/aggregate query must filter
+  // `deleted_at IS NULL`; the /api/recycle-bin routes are the only place these
+  // rows are ever read back or hard-deleted.
+  await ensureColumn("customers", "deleted_at", "DATETIME NULL");
+  await ensureColumn("transactions", "deleted_at", "DATETIME NULL");
+  await ensureColumn("records", "deleted_at", "DATETIME NULL");
+  await ensureColumn("cashbook_entries", "deleted_at", "DATETIME NULL");
 }
 
 module.exports = { pool, ensureSchema, ensureColumn, ensureUniqueIndex };

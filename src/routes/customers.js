@@ -11,7 +11,7 @@ async function balanceForCustomer(customerId, openingBalance) {
     `SELECT
        COALESCE(SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END), 0) AS total_debit,
        COALESCE(SUM(CASE WHEN type = 'credit' THEN amount ELSE 0 END), 0) AS total_credit
-     FROM transactions WHERE customer_id = ?`,
+     FROM transactions WHERE customer_id = ? AND deleted_at IS NULL`,
     [customerId]
   );
   const row = rows[0];
@@ -27,6 +27,7 @@ async function balanceForCustomer(customerId, openingBalance) {
 // List customers for a business, with computed balances — one aggregate query
 // instead of one balance lookup per customer, which matters a lot over a remote
 // MySQL connection where each extra round-trip adds real latency.
+// Soft-deleted customers and soft-deleted transactions are both excluded.
 router.get("/", resolveBusinessId, async (req, res, next) => {
   try {
     const [customers] = await pool.query(
@@ -37,8 +38,8 @@ router.get("/", resolveBusinessId, async (req, res, next) => {
            + COALESCE(SUM(CASE WHEN t.type = 'debit' THEN t.amount ELSE 0 END), 0)
            - COALESCE(SUM(CASE WHEN t.type = 'credit' THEN t.amount ELSE 0 END), 0) AS balance
        FROM customers c
-       LEFT JOIN transactions t ON t.customer_id = c.id
-       WHERE c.business_id = ?
+       LEFT JOIN transactions t ON t.customer_id = c.id AND t.deleted_at IS NULL
+       WHERE c.business_id = ? AND c.deleted_at IS NULL
        GROUP BY c.id
        ORDER BY c.name ASC`,
       [req.businessId]
@@ -68,15 +69,15 @@ router.post("/", resolveBusinessId, requirePermission("manage_customers"), async
 
 router.get("/:id", resolveBusinessId, async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM customers WHERE id = ? AND business_id = ?", [
-      req.params.id,
-      req.businessId,
-    ]);
+    const [rows] = await pool.query(
+      "SELECT * FROM customers WHERE id = ? AND business_id = ? AND deleted_at IS NULL",
+      [req.params.id, req.businessId]
+    );
     const customer = rows[0];
     if (!customer) return res.status(404).json({ error: "Customer not found" });
 
     const [transactions] = await pool.query(
-      "SELECT * FROM transactions WHERE customer_id = ? ORDER BY txn_date ASC, id ASC",
+      "SELECT * FROM transactions WHERE customer_id = ? AND deleted_at IS NULL ORDER BY txn_date ASC, id ASC",
       [customer.id]
     );
 
@@ -91,10 +92,10 @@ router.get("/:id", resolveBusinessId, async (req, res, next) => {
 
 router.patch("/:id", resolveBusinessId, requirePermission("manage_customers"), async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM customers WHERE id = ? AND business_id = ?", [
-      req.params.id,
-      req.businessId,
-    ]);
+    const [rows] = await pool.query(
+      "SELECT * FROM customers WHERE id = ? AND business_id = ? AND deleted_at IS NULL",
+      [req.params.id, req.businessId]
+    );
     if (rows.length === 0) return res.status(404).json({ error: "Customer not found" });
 
     const { name, phone, address, opening_balance } = req.body;
@@ -109,15 +110,16 @@ router.patch("/:id", resolveBusinessId, requirePermission("manage_customers"), a
   }
 });
 
+// Soft delete — moves the customer to the Recycle Bin instead of removing it.
 router.delete("/:id", resolveBusinessId, requirePermission("manage_customers"), async (req, res, next) => {
   try {
-    const [rows] = await pool.query("SELECT * FROM customers WHERE id = ? AND business_id = ?", [
-      req.params.id,
-      req.businessId,
-    ]);
+    const [rows] = await pool.query(
+      "SELECT * FROM customers WHERE id = ? AND business_id = ? AND deleted_at IS NULL",
+      [req.params.id, req.businessId]
+    );
     if (rows.length === 0) return res.status(404).json({ error: "Customer not found" });
 
-    await pool.query("DELETE FROM customers WHERE id = ?", [req.params.id]);
+    await pool.query("UPDATE customers SET deleted_at = NOW() WHERE id = ?", [req.params.id]);
     res.json({ ok: true });
   } catch (err) {
     next(err);

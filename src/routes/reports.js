@@ -18,7 +18,7 @@ router.get("/summary", resolveBusinessId, async (req, res, next) => {
          COALESCE(SUM(CASE WHEN type = 'debit' THEN amount ELSE 0 END), 0) AS total_debit,
          COALESCE(SUM(CASE WHEN type = 'credit' THEN amount ELSE 0 END), 0) AS total_credit
        FROM transactions
-       WHERE business_id = ?
+       WHERE business_id = ? AND deleted_at IS NULL
        GROUP BY period
        ORDER BY period DESC
        LIMIT ?`,
@@ -42,8 +42,8 @@ router.get("/outstanding", resolveBusinessId, async (req, res, next) => {
            + COALESCE(SUM(CASE WHEN t.type = 'debit' THEN t.amount ELSE 0 END), 0)
            - COALESCE(SUM(CASE WHEN t.type = 'credit' THEN t.amount ELSE 0 END), 0) AS balance
        FROM customers c
-       LEFT JOIN transactions t ON t.customer_id = c.id
-       WHERE c.business_id = ?
+       LEFT JOIN transactions t ON t.customer_id = c.id AND t.deleted_at IS NULL
+       WHERE c.business_id = ? AND c.deleted_at IS NULL
        GROUP BY c.id, c.name, c.phone, c.opening_balance
        HAVING balance != 0
        ORDER BY balance DESC`,
@@ -67,7 +67,7 @@ router.get("/records-totals", resolveBusinessId, async (req, res, next) => {
          COALESCE(SUM(CASE WHEN category = 'bill' AND settled = 0 THEN amount ELSE 0 END), 0) AS bills_pending,
          COALESCE(SUM(CASE WHEN category = 'bill' AND settled = 1 THEN amount ELSE 0 END), 0) AS bills_paid
        FROM records
-       WHERE business_id = ?`,
+       WHERE business_id = ? AND deleted_at IS NULL`,
       [req.businessId]
     );
     res.json({ totals: rows[0] });
@@ -90,7 +90,7 @@ router.get("/records-summary", resolveBusinessId, async (req, res, next) => {
          COALESCE(SUM(CASE WHEN category = 'bill' THEN amount ELSE 0 END), 0) AS bill,
          COALESCE(SUM(CASE WHEN category = 'contribution' THEN amount ELSE 0 END), 0) AS contribution
        FROM records
-       WHERE business_id = ?
+       WHERE business_id = ? AND deleted_at IS NULL
        GROUP BY period
        ORDER BY period DESC
        LIMIT ?`,
@@ -114,9 +114,9 @@ router.get("/overview", async (req, res, next) => {
       `SELECT b.id AS business_id, b.name AS business_name,
          COALESCE(SUM(CASE WHEN t.type = 'debit' THEN t.amount ELSE 0 END), 0) AS total_debit,
          COALESCE(SUM(CASE WHEN t.type = 'credit' THEN t.amount ELSE 0 END), 0) AS total_credit,
-         (SELECT COUNT(*) FROM customers c WHERE c.business_id = b.id) AS customer_count
+         (SELECT COUNT(*) FROM customers c WHERE c.business_id = b.id AND c.deleted_at IS NULL) AS customer_count
        FROM businesses b
-       LEFT JOIN transactions t ON t.business_id = b.id
+       LEFT JOIN transactions t ON t.business_id = b.id AND t.deleted_at IS NULL
        WHERE b.created_by = ?
        GROUP BY b.id, b.name
        ORDER BY b.name ASC`,
